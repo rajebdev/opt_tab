@@ -5,6 +5,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     var statusItem: NSStatusItem?
     var appSwitcher: AppSwitcher?
     var eventMonitor: EventMonitor?
+    var permissionTimer: Timer?
     var useColoredIcon: Bool {
         get { UserDefaults.standard.bool(forKey: "useColoredIcon") }
         set { UserDefaults.standard.set(newValue, forKey: "useColoredIcon") }
@@ -74,36 +75,61 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     func checkPermissionsTimer() {
-        Timer.scheduledTimer(withTimeInterval: 2.0, repeats: true) { timer in
+        permissionTimer = Timer.scheduledTimer(withTimeInterval: 2.0, repeats: true) {
+            [weak self] timer in
             let accessibilityEnabled = AXIsProcessTrusted()
             if accessibilityEnabled {
                 print("")
                 print("✅ ✅ ✅ Accessibility permission granted! Option+Tab now active! ✅ ✅ ✅")
                 print("")
                 timer.invalidate()
+                self?.permissionTimer = nil
             }
         }
     }
 
+    func applicationWillTerminate(_ notification: Notification) {
+        // Clean up timer to prevent memory leak
+        permissionTimer?.invalidate()
+        permissionTimer = nil
+    }
+
     func checkScreenRecordingPermission() {
-        // Try to capture a small area to check screen recording permission
+        // Check if we already have screen recording permission
         let hasPermission = CGPreflightScreenCaptureAccess()
 
         if !hasPermission {
+            // Request permission by actually attempting to capture
+            // This triggers the system to add the app to Privacy & Security list
             print("")
-            print("⚠️  SCREEN RECORDING PERMISSION NEEDED FOR THUMBNAILS")
-            print("")
-            print("📋 To show window thumbnails:")
-            print("   1. Open System Settings")
-            print("   2. Go to Privacy & Security → Screen Recording")
-            print("   3. Toggle ON for OptTab")
-            print("   4. Restart this app")
-            print("")
-            print("💡 App will work without thumbnails, but icons only.")
+            print("🎬 Requesting Screen Recording permission for thumbnails...")
             print("")
 
-            // Request permission by attempting screen capture
-            CGRequestScreenCaptureAccess()
+            // Attempt a dummy screen capture to trigger permission dialog
+            // This will automatically add the app to System Settings > Privacy & Security > Screen Recording
+            _ = NSScreen.main?.frame ?? .zero
+            if CGWindowListCreateImage(
+                CGRect(x: 0, y: 0, width: 1, height: 1),
+                .optionOnScreenOnly,
+                kCGNullWindowID,
+                .bestResolution
+            ) != nil {
+                // Successfully captured (permission already granted)
+                print("✅ Screen Recording permission granted! Thumbnails enabled.")
+            } else {
+                // Failed to capture - permission dialog should appear
+                print("")
+                print("⚠️  SCREEN RECORDING PERMISSION NEEDED FOR THUMBNAILS")
+                print("")
+                print("📋 To show window thumbnails:")
+                print("   1. System Settings should open automatically")
+                print("   2. Go to Privacy & Security → Screen Recording")
+                print("   3. Toggle ON for OptTab")
+                print("   4. Restart this app")
+                print("")
+                print("💡 App will work without thumbnails, but icons only.")
+                print("")
+            }
         } else {
             print("✅ Screen Recording permission granted! Thumbnails enabled.")
         }

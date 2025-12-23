@@ -1,6 +1,117 @@
 import ApplicationServices
 import Cocoa
 
+// MARK: - ClickableView for mouse interaction
+class ClickableView: NSView {
+    var clickHandler: (() -> Void)?
+
+    override func mouseDown(with event: NSEvent) {
+        clickHandler?()
+    }
+}
+
+class ArrowButton: NSView {
+    var clickHandler: (() -> Void)?
+    private let isNext: Bool
+
+    init(frame: NSRect, isNext: Bool) {
+        self.isNext = isNext
+        super.init(frame: frame)
+        setupView()
+    }
+
+    required init?(coder: NSCoder) {
+        fatalError("init(coder:) has not been implemented")
+    }
+
+    private func setupView() {
+        wantsLayer = true
+        layer?.backgroundColor = NSColor.white.withAlphaComponent(0.15).cgColor
+        layer?.cornerRadius = frame.width / 2
+        layer?.borderWidth = 2
+        layer?.borderColor = NSColor.white.withAlphaComponent(0.3).cgColor
+
+        // Add arrow symbol - perfectly centered
+        let arrowLabel = NSTextField(frame: bounds)
+        arrowLabel.stringValue = isNext ? "›" : "‹"
+        arrowLabel.alignment = .center
+        arrowLabel.isEditable = false
+        arrowLabel.isBordered = false
+        arrowLabel.isSelectable = false
+        arrowLabel.backgroundColor = .clear
+        arrowLabel.textColor = .white
+        arrowLabel.font = NSFont.systemFont(ofSize: 36, weight: .bold)
+
+        // Center vertically by adjusting frame
+        arrowLabel.cell?.usesSingleLineMode = true
+        arrowLabel.cell?.truncatesLastVisibleLine = true
+
+        // Fine-tune vertical centering
+        let textHeight = arrowLabel.font!.boundingRectForFont.height
+        let yOffset = (bounds.height - textHeight) / 2
+        arrowLabel.frame = NSRect(x: 0, y: yOffset - 2, width: bounds.width, height: textHeight + 4)
+
+        addSubview(arrowLabel)
+    }
+
+    override func mouseDown(with event: NSEvent) {
+        // Visual feedback
+        layer?.backgroundColor = NSColor.white.withAlphaComponent(0.3).cgColor
+        clickHandler?()
+
+        // Reset after short delay
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.15) { [weak self] in
+            self?.layer?.backgroundColor = NSColor.white.withAlphaComponent(0.15).cgColor
+        }
+    }
+
+    override func mouseEntered(with event: NSEvent) {
+        layer?.backgroundColor = NSColor.white.withAlphaComponent(0.25).cgColor
+    }
+
+    override func mouseExited(with event: NSEvent) {
+        layer?.backgroundColor = NSColor.white.withAlphaComponent(0.15).cgColor
+    }
+
+    override func updateTrackingAreas() {
+        super.updateTrackingAreas()
+
+        for trackingArea in trackingAreas {
+            removeTrackingArea(trackingArea)
+        }
+
+        let options: NSTrackingArea.Options = [.mouseEnteredAndExited, .activeInKeyWindow]
+        let trackingArea = NSTrackingArea(
+            rect: bounds, options: options, owner: self, userInfo: nil)
+        addTrackingArea(trackingArea)
+    }
+}
+
+// MARK: - Private API Declarations
+// SkyLight.framework private APIs for better window capture
+typealias CGSConnectionID = UInt32
+
+struct CGSWindowCaptureOptions: OptionSet {
+    let rawValue: UInt32
+    static let ignoreGlobalClipShape = CGSWindowCaptureOptions(rawValue: 1 << 11)
+    static let nominalResolution = CGSWindowCaptureOptions(rawValue: 1 << 9)
+    static let bestResolution = CGSWindowCaptureOptions(rawValue: 1 << 8)
+    static let fullSize = CGSWindowCaptureOptions(rawValue: 1 << 19)
+}
+
+@_silgen_name("CGSMainConnectionID")
+func CGSMainConnectionID() -> CGSConnectionID
+
+/// CGSHWCaptureWindowList can capture minimized windows (unlike CGWindowListCreateImage)
+/// Performance: Faster, Quality: Medium, Can capture: minimized + other spaces
+@_silgen_name("CGSHWCaptureWindowList")
+func CGSHWCaptureWindowList(
+    _ cid: CGSConnectionID,
+    _ windowList: UnsafeMutablePointer<CGWindowID>,
+    _ windowCount: UInt32,
+    _ options: CGSWindowCaptureOptions
+) -> Unmanaged<CFArray>
+
 class AppSwitcher {
     private var window: NSWindow?
     private var collectionView: NSCollectionView?
@@ -11,6 +122,14 @@ class AppSwitcher {
     private var localFlagsMonitor: Any?
     private var globalFlagsMonitor: Any?
 
+    // Cache app icons to avoid duplication (one icon per app, not per window)
+    private var appIconCache: [pid_t: NSImage] = [:]
+
+    // Pagination support
+    private var allWindows: [WindowInfo] = []  // All windows (unfiltered)
+    private var currentPage: Int = 0
+    private let itemsPerPage: Int = 16
+
     struct WindowInfo {
         let windowID: CGWindowID
         let ownerPID: pid_t
@@ -18,7 +137,7 @@ class AppSwitcher {
         let windowTitle: String
         let originalAXTitle: String  // Original title dari AX API untuk matching
         let thumbnail: NSImage
-        let appIcon: NSImage
+        let appIconPID: pid_t  // Store PID instead of icon itself
         let bounds: CGRect
     }
 
@@ -31,21 +150,30 @@ class AppSwitcher {
 
         isShowing = true
 
-        // Get all windows
-        windows = getAllWindows()
-
-        // Limit to 16 windows to reduce WindowServer memory usage
-        if windows.count > 16 {
-            windows = Array(windows.prefix(16))
+        // Clear previous data before getting new windows
+        autoreleasepool {
+            self.windows.removeAll(keepingCapacity: false)
+            self.allWindows.removeAll(keepingCapacity: false)
+            self.appIconCache.removeAll(keepingCapacity: false)
         }
 
-        print("🪟 Found \(windows.count) windows:")
+        // Get all windows (without limit)
+        allWindows = getAllWindows()
+        currentPage = 0
+
+        let totalPages = (allWindows.count + itemsPerPage - 1) / itemsPerPage
+        print("🪟 Found \(allWindows.count) windows across \(totalPages) page(s)")
+
+        // Set current page windows
+        updateCurrentPageWindows()
+
         for (i, win) in windows.enumerated() {
-            print("  [\(i)] \(win.ownerName) - \(win.windowTitle)")
+            let globalIndex = currentPage * itemsPerPage + i
+            print("  [\(globalIndex)] \(win.ownerName) - \(win.windowTitle)")
             print("      → Original AX: [\(win.originalAXTitle)], WindowID: \(win.windowID)")
         }
 
-        if windows.count <= 1 {
+        if allWindows.count <= 1 {
             isShowing = false
             return
         }
@@ -89,23 +217,35 @@ class AppSwitcher {
         // Hide window FIRST before activating the selected window
         window?.orderOut(nil)
 
-        // Clear window content to free memory
-        window?.contentView?.subviews.forEach { $0.removeFromSuperview() }
+        // Aggressive memory cleanup for thumbnails and cached images
+        clearAllMemory()
+
+        // Clear windows arrays immediately to release thumbnail memory ASAP
+        // Keep only selected window info before async
+        let selectedInfo = selectedWindowInfo
+        self.windows.removeAll(keepingCapacity: false)
+        self.allWindows.removeAll(keepingCapacity: false)
+
+        // Clear icon cache to free memory
+        self.appIconCache.removeAll(keepingCapacity: false)
 
         // Small delay to ensure overlay is hidden before switching
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) { [weak self] in
-            guard let self = self else { return }
-
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) {
             // Use captured window info directly
-            self.activateWindow(windowInfo: selectedWindowInfo)
-
-            // Clear windows array to release thumbnail memory
-            self.windows.removeAll()
+            self.activateWindow(windowInfo: selectedInfo)
         }
     }
 
     private func getAllWindows() -> [WindowInfo] {
         var windowInfos: [WindowInfo] = []
+        windowInfos.reserveCapacity(32)  // Pre-allocate for larger expected size
+
+        // Clear icon cache at start
+        appIconCache.removeAll(keepingCapacity: false)
+
+        // Fetch CGWindowList once for all windows (memory efficient)
+        let options: CGWindowListOption = [.excludeDesktopElements]
+        let cgWindowList = CGWindowListCopyWindowInfo(options, kCGNullWindowID) as? [[String: Any]]
 
         // Get running apps from Dock (regular apps only)
         let workspace = NSWorkspace.shared
@@ -130,9 +270,14 @@ class AppSwitcher {
 
         // For each app, get all its windows
         for app in sortedApps {
-            guard let appIcon = app.icon else { continue }
             let appName = app.localizedName ?? "Unknown"
             let pid = app.processIdentifier
+
+            // Cache app icon once per app (memory efficient)
+            if appIconCache[pid] == nil {
+                guard let appIcon = app.icon else { continue }
+                appIconCache[pid] = appIcon
+            }
 
             // Get windows for this app using AX API
             let appElement = AXUIElementCreateApplication(pid)
@@ -192,13 +337,10 @@ class AppSwitcher {
                     // Skip very small windows
                     guard size.width > 100 && size.height > 50 else { continue }
 
-                    // Get window ID for thumbnail (try to find matching CGWindow)
+                    // Get window ID for thumbnail (use pre-fetched list)
                     var windowID: CGWindowID = 0
-                    let options: CGWindowListOption = [.excludeDesktopElements]
-                    if let windowList = CGWindowListCopyWindowInfo(options, kCGNullWindowID)
-                        as? [[String: Any]]
-                    {
-                        // Try to match by exact title
+                    if let windowList = cgWindowList {
+                        // Try multiple matching strategies for Chrome/Electron apps
                         for windowDict in windowList {
                             if let ownerPID = windowDict[kCGWindowOwnerPID as String] as? pid_t,
                                 ownerPID == pid,
@@ -207,12 +349,42 @@ class AppSwitcher {
                                 let windowName =
                                     windowDict[kCGWindowName as String] as? String ?? ""
 
-                                // Only use exact title match - no fallback
+                                // Strategy 1: Exact match
                                 if windowName == windowTitle {
                                     windowID = wid
                                     if appName.contains("Chrome") {
                                         print(
-                                            "  [MAP] Chrome window '\(windowTitle)' -> ID: \(wid)")
+                                            "  [MAP] Chrome window '\(windowTitle)' -> ID: \(wid) (exact)"
+                                        )
+                                    }
+                                    break
+                                }
+
+                                // Strategy 2: Chrome/Electron - CGWindow title is prefix of AX title
+                                // AX: "Page Title - Google Chrome - Profile"
+                                // CG: "Page Title"
+                                if windowTitle.hasPrefix(windowName) && !windowName.isEmpty
+                                    && windowName.count > 3
+                                {
+                                    windowID = wid
+                                    if appName.contains("Chrome") {
+                                        print(
+                                            "  [MAP] Chrome window '\(windowTitle)' -> ID: \(wid) (prefix match: '\(windowName)')"
+                                        )
+                                    }
+                                    break
+                                }
+
+                                // Strategy 3: Try to match first part before " - "
+                                if let firstPart = windowTitle.components(separatedBy: " - ").first,
+                                    firstPart.count > 3,
+                                    windowName == firstPart
+                                {
+                                    windowID = wid
+                                    if appName.contains("Chrome") {
+                                        print(
+                                            "  [MAP] Chrome window '\(windowTitle)' -> ID: \(wid) (first part match)"
+                                        )
                                     }
                                     break
                                 }
@@ -228,11 +400,12 @@ class AppSwitcher {
                     }
 
                     // Capture thumbnail (pass icon for fallback)
+                    // Now can capture minimized windows using CGSHWCaptureWindowList!
                     let thumbnail = captureWindowThumbnail(
                         windowID: windowID, bounds: bounds, isMinimized: isMinimized,
-                        appIcon: appIcon)
+                        appIcon: appIconCache[pid]!)
 
-                    // Format title - never show just app name
+                    // Format title - show minimize indicator
                     let prefix = isMinimized ? "🔽 " : ""
                     let displayTitle = prefix + "\(appName): \(windowTitle)"
 
@@ -251,7 +424,7 @@ class AppSwitcher {
                             windowTitle: displayTitle,
                             originalAXTitle: windowTitle,  // Store original AX title
                             thumbnail: thumbnail,
-                            appIcon: appIcon,
+                            appIconPID: pid,  // Store PID instead of duplicating icon
                             bounds: bounds
                         ))
                 }
@@ -264,38 +437,109 @@ class AppSwitcher {
     private func captureWindowThumbnail(
         windowID: CGWindowID, bounds: CGRect, isMinimized: Bool, appIcon: NSImage
     ) -> NSImage {
-        // Smaller thumbnail size to reduce WindowServer memory
-        let targetWidth: CGFloat = 200
-        let targetHeight: CGFloat = 100
+        // 2x retina size for sharp display (UI shows 230x110)
+        let targetWidth: CGFloat = 460
+        let targetHeight: CGFloat = 220
 
-        // For minimized windows or if windowID is 0, just use app icon
-        if isMinimized {
-            return createIconPlaceholder(
-                width: targetWidth, height: targetHeight, icon: appIcon)
-        }
-
+        // Use icon placeholder only if windowID is invalid (0)
         if windowID == 0 {
             return createIconPlaceholder(
                 width: targetWidth, height: targetHeight, icon: appIcon)
         }
 
-        // Use lower resolution to save memory
-        let options: CGWindowImageOption = [.boundsIgnoreFraming, .nominalResolution]
+        // Use autoreleasepool to ensure CGImage is released immediately
+        return autoreleasepool {
+            // Use CGSHWCaptureWindowList - can capture minimized windows!
+            // More memory efficient than CGWindowListCreateImage with better performance
+            var windowId = windowID
+            let connectionId = CGSMainConnectionID()
 
-        if let cgImage = CGWindowListCreateImage(
-            .null,
-            .optionIncludingWindow,
-            windowID,
-            options
-        ), cgImage.width > 10, cgImage.height > 10 {
-            // Convert to NSImage with proper scaling
-            let image = NSImage(
-                cgImage: cgImage, size: NSSize(width: targetWidth, height: targetHeight))
-            return image
+            // Use bestResolution for sharper thumbnails
+            let captureOptions: CGSWindowCaptureOptions = [
+                .ignoreGlobalClipShape,
+                .bestResolution,
+            ]
+
+            let imageList =
+                CGSHWCaptureWindowList(
+                    connectionId,
+                    &windowId,
+                    1,
+                    captureOptions
+                ).takeRetainedValue() as! [CGImage]
+
+            if let cgImage = imageList.first, cgImage.width > 10, cgImage.height > 10 {
+                // Resize immediately to reduce memory footprint
+                // Don't store full-size CGImage in memory!
+                let resizedImage = resizeImage(
+                    cgImage, targetWidth: targetWidth, targetHeight: targetHeight)
+                return resizedImage
+            }
+
+            // Return app icon placeholder if capture fails
+            return createIconPlaceholder(width: targetWidth, height: targetHeight, icon: appIcon)
         }
+    }
 
-        // Return app icon placeholder if capture fails
-        return createIconPlaceholder(width: targetWidth, height: targetHeight, icon: appIcon)
+    private func resizeImage(_ cgImage: CGImage, targetWidth: CGFloat, targetHeight: CGFloat)
+        -> NSImage
+    {
+        // Use autoreleasepool to ensure intermediate objects are freed
+        return autoreleasepool {
+            // Calculate aspect-fit size
+            let imageWidth = CGFloat(cgImage.width)
+            let imageHeight = CGFloat(cgImage.height)
+            let aspectRatio = imageWidth / imageHeight
+            let targetAspectRatio = targetWidth / targetHeight
+
+            var drawWidth: CGFloat
+            var drawHeight: CGFloat
+
+            if aspectRatio > targetAspectRatio {
+                // Image is wider - fit to width
+                drawWidth = targetWidth
+                drawHeight = targetWidth / aspectRatio
+            } else {
+                // Image is taller - fit to height
+                drawHeight = targetHeight
+                drawWidth = targetHeight * aspectRatio
+            }
+
+            // Create smaller bitmap context to save memory
+            let colorSpace = cgImage.colorSpace ?? CGColorSpaceCreateDeviceRGB()
+            let bitmapInfo = CGBitmapInfo(rawValue: CGImageAlphaInfo.premultipliedFirst.rawValue)
+                .union(.byteOrder32Little)
+
+            guard
+                let context = CGContext(
+                    data: nil,
+                    width: Int(drawWidth),
+                    height: Int(drawHeight),
+                    bitsPerComponent: 8,
+                    bytesPerRow: 0,
+                    space: colorSpace,
+                    bitmapInfo: bitmapInfo.rawValue
+                )
+            else {
+                // Fallback if context creation fails
+                return NSImage(
+                    cgImage: cgImage, size: NSSize(width: targetWidth, height: targetHeight))
+            }
+
+            // High quality interpolation for sharp thumbnails
+            context.interpolationQuality = .high
+            context.draw(cgImage, in: CGRect(x: 0, y: 0, width: drawWidth, height: drawHeight))
+
+            guard let resizedCGImage = context.makeImage() else {
+                return NSImage(
+                    cgImage: cgImage, size: NSSize(width: targetWidth, height: targetHeight))
+            }
+
+            // Create NSImage - autoreleasepool will release resizedCGImage after this
+            let result = NSImage(
+                cgImage: resizedCGImage, size: NSSize(width: drawWidth, height: drawHeight))
+            return result
+        }
     }
 
     private func createIconPlaceholder(width: CGFloat, height: CGFloat, icon: NSImage)
@@ -387,10 +631,10 @@ class AppSwitcher {
         guard let screen = NSScreen.main else { return }
         let screenFrame = screen.frame
 
-        // Grid layout settings
-        let itemWidth: CGFloat = 280
-        let itemHeight: CGFloat = 200
-        let spacing: CGFloat = 30
+        // Grid layout settings - slightly smaller to reduce rendering memory
+        let itemWidth: CGFloat = 260
+        let itemHeight: CGFloat = 180
+        let spacing: CGFloat = 25
         let padding: CGFloat = 20  // Padding di sekitar grid
 
         // Calculate grid dimensions
@@ -421,6 +665,53 @@ class AppSwitcher {
         containerView.layer?.cornerRadius = 16
         contentView.addSubview(containerView)
 
+        // Add page indicator if multiple pages
+        let totalPages = (allWindows.count + itemsPerPage - 1) / itemsPerPage
+        if totalPages > 1 {
+            let pageIndicator = NSTextField(
+                frame: NSRect(
+                    x: containerX,
+                    y: containerY - 35,
+                    width: containerWidth,
+                    height: 25
+                ))
+            pageIndicator.stringValue =
+                "Page \(currentPage + 1) of \(totalPages) • Press Tab to continue"
+            pageIndicator.alignment = .center
+            pageIndicator.isEditable = false
+            pageIndicator.isBordered = false
+            pageIndicator.backgroundColor = .clear
+            pageIndicator.textColor = .white
+            pageIndicator.font = NSFont.systemFont(ofSize: 13, weight: .medium)
+            contentView.addSubview(pageIndicator)
+
+            // Add arrow buttons for page navigation
+            let buttonSize: CGFloat = 60
+            let buttonY = containerY + (containerHeight - buttonSize) / 2
+
+            // Previous page button (left arrow) - show only if not on first page
+            if currentPage > 0 {
+                let prevButton = createArrowButton(
+                    frame: NSRect(
+                        x: containerX - buttonSize - 30, y: buttonY, width: buttonSize,
+                        height: buttonSize),
+                    isNext: false
+                )
+                contentView.addSubview(prevButton)
+            }
+
+            // Next page button (right arrow) - show only if not on last page
+            if currentPage < totalPages - 1 {
+                let nextButton = createArrowButton(
+                    frame: NSRect(
+                        x: containerX + containerWidth + 30, y: buttonY, width: buttonSize,
+                        height: buttonSize),
+                    isNext: true
+                )
+                contentView.addSubview(nextButton)
+            }
+        }
+
         // Calculate starting position untuk grid (relatif terhadap screen)
         let startX = containerX + padding
         let startY = containerY + padding
@@ -436,14 +727,22 @@ class AppSwitcher {
             let y = startY + CGFloat(rows - 1 - row) * (itemHeight + spacing)
 
             let itemView = createWindowItemView(
-                windowInfo: windowInfo, isSelected: index == selectedIndex)
+                windowInfo: windowInfo, isSelected: index == selectedIndex, index: index)
             itemView.frame = NSRect(x: x, y: y, width: itemWidth, height: itemHeight)
             contentView.addSubview(itemView)
         }
     }
 
-    private func createWindowItemView(windowInfo: WindowInfo, isSelected: Bool) -> NSView {
-        let view = NSView()
+    private func createWindowItemView(windowInfo: WindowInfo, isSelected: Bool, index: Int)
+        -> NSView
+    {
+        let view = ClickableView()
+        view.clickHandler = { [weak self] in
+            guard let self = self else { return }
+            self.selectedIndex = index
+            // Immediately hide and switch to the clicked window
+            self.hide()
+        }
         view.wantsLayer = true
         view.layer?.backgroundColor =
             isSelected
@@ -454,21 +753,21 @@ class AppSwitcher {
         view.layer?.borderColor =
             isSelected ? NSColor.systemBlue.cgColor : NSColor.white.withAlphaComponent(0.3).cgColor
 
-        // Thumbnail (larger)
-        let thumbnailView = NSImageView(frame: NSRect(x: 15, y: 60, width: 250, height: 120))
+        // Thumbnail (adjusted to match smaller size for memory efficiency)
+        let thumbnailView = NSImageView(frame: NSRect(x: 15, y: 55, width: 230, height: 110))
         thumbnailView.image = windowInfo.thumbnail
-        thumbnailView.imageScaling = .scaleProportionallyDown
+        thumbnailView.imageScaling = .scaleProportionallyUpOrDown  // Fill entire area
         thumbnailView.wantsLayer = true
         thumbnailView.layer?.cornerRadius = 6
-        thumbnailView.layer?.masksToBounds = true
+        thumbnailView.layer?.masksToBounds = true  // Crop overflow
         thumbnailView.layer?.borderWidth = 1
         thumbnailView.layer?.borderColor = NSColor.white.withAlphaComponent(0.3).cgColor
         thumbnailView.layer?.backgroundColor = NSColor.black.withAlphaComponent(0.5).cgColor
         view.addSubview(thumbnailView)
 
-        // App icon (larger)
+        // App icon (larger) - get from cache
         let iconView = NSImageView(frame: NSRect(x: 15, y: 15, width: 32, height: 32))
-        iconView.image = windowInfo.appIcon
+        iconView.image = appIconCache[windowInfo.appIconPID]
         iconView.imageScaling = .scaleProportionallyUpOrDown
         view.addSubview(iconView)
 
@@ -490,13 +789,86 @@ class AppSwitcher {
     }
 
     private func selectNext() {
-        selectedIndex = (selectedIndex + 1) % windows.count
+        selectedIndex += 1
+
+        // Check if we reached end of current page
+        if selectedIndex >= windows.count {
+            // Move to next page
+            let totalPages = (allWindows.count + itemsPerPage - 1) / itemsPerPage
+            currentPage = (currentPage + 1) % totalPages
+
+            // Update windows for new page
+            updateCurrentPageWindows()
+
+            // Reset to first item of new page
+            selectedIndex = 0
+
+            print("📄 Switched to page \(currentPage + 1)/\(totalPages)")
+        }
+
         updateWindowContent()
     }
 
     private func selectPrevious() {
-        selectedIndex = (selectedIndex - 1 + windows.count) % windows.count
+        selectedIndex -= 1
+
+        // Check if we went before first item
+        if selectedIndex < 0 {
+            // Move to previous page
+            let totalPages = (allWindows.count + itemsPerPage - 1) / itemsPerPage
+            currentPage = (currentPage - 1 + totalPages) % totalPages
+
+            // Update windows for new page
+            updateCurrentPageWindows()
+
+            // Go to last item of previous page
+            selectedIndex = windows.count - 1
+
+            print("📄 Switched to page \(currentPage + 1)/\(totalPages)")
+        }
+
         updateWindowContent()
+    }
+
+    private func updateCurrentPageWindows() {
+        let startIndex = currentPage * itemsPerPage
+        let endIndex = min(startIndex + itemsPerPage, allWindows.count)
+        windows = Array(allWindows[startIndex..<endIndex])
+    }
+
+    private func createArrowButton(frame: NSRect, isNext: Bool) -> ArrowButton {
+        let button = ArrowButton(frame: frame, isNext: isNext)
+        button.clickHandler = { [weak self] in
+            guard let self = self else { return }
+            if isNext {
+                self.goToNextPage()
+            } else {
+                self.goToPreviousPage()
+            }
+        }
+        return button
+    }
+
+    private func goToNextPage() {
+        let totalPages = (allWindows.count + itemsPerPage - 1) / itemsPerPage
+        if currentPage < totalPages - 1 {
+            currentPage += 1
+            updateCurrentPageWindows()
+            selectedIndex = 0  // Reset to first item of new page
+            updateWindowContent()
+            print("📄 Navigated to page \(currentPage + 1)/\(totalPages)")
+        }
+    }
+
+    private func goToPreviousPage() {
+        let totalPages = (allWindows.count + itemsPerPage - 1) / itemsPerPage
+        if currentPage > 0 {
+            currentPage -= 1
+            updateCurrentPageWindows()
+            selectedIndex = 0  // Reset to first item of new page
+            updateWindowContent()
+            print("📄 Navigated to page \(currentPage + 1)/\(totalPages)")
+        }
     }
 
     private func setupKeyMonitoring() {
@@ -505,9 +877,14 @@ class AppSwitcher {
             [weak self] event in
             guard let self = self, self.isShowing else { return event }
 
-            // Tab - next app (consume all Tab presses when showing)
+            // Tab key - next/previous item with pagination support
             if event.keyCode == 48 {
-                self.selectNext()
+                // Check if Shift is pressed for reverse navigation
+                if event.modifierFlags.contains(.shift) {
+                    self.selectPrevious()
+                } else {
+                    self.selectNext()
+                }
                 return nil  // Always consume Tab when switcher is showing
             }
 
@@ -722,6 +1099,61 @@ class AppSwitcher {
             AXUIElementPerformAction(window, kAXRaiseAction as CFString)
             AXUIElementSetAttributeValue(
                 window, kAXFocusedAttribute as CFString, kCFBooleanTrue)
+        }
+    }
+
+    // MARK: - Memory Management
+    /// Aggressively clear all cached thumbnails and images to free memory
+    private func clearAllMemory() {
+        autoreleasepool {
+            // Clear all thumbnails in windows array
+            windows.forEach { windowInfo in
+                // Force deallocation by removing all references
+                _ = windowInfo.thumbnail
+            }
+
+            // Clear all thumbnails in allWindows array
+            allWindows.forEach { windowInfo in
+                _ = windowInfo.thumbnail
+            }
+
+            // Clear all subviews and their images
+            window?.contentView?.subviews.forEach { subview in
+                clearViewHierarchy(subview)
+                subview.removeFromSuperview()
+            }
+
+            // Clear collection view items
+            if let collectionView = collectionView {
+                collectionView.visibleItems().forEach { item in
+                    if let imageView = item.view.subviews.first(where: { $0 is NSImageView })
+                        as? NSImageView
+                    {
+                        imageView.image = nil
+                    }
+                }
+                collectionView.reloadData()
+            }
+
+            // Clear cached app icons
+            appIconCache.forEach { (_, icon) in
+                _ = icon
+            }
+
+            print("🧹 Memory cleared: thumbnails, caches, and UI elements released")
+        }
+    }
+
+    /// Recursively clear all images in view hierarchy
+    private func clearViewHierarchy(_ view: NSView) {
+        // Clear image if it's an NSImageView
+        if let imageView = view as? NSImageView {
+            imageView.image = nil
+        }
+
+        // Recursively clear all subviews
+        view.subviews.forEach { subview in
+            clearViewHierarchy(subview)
         }
     }
 }
