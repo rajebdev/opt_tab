@@ -1,0 +1,46 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>CFBundleName</key>
+    <string>OptTab</string>
+    <key>CFBundleDisplayName</key>
+    <string>OptTab</string>
+    <key>CFBundleIdentifier</key>
+    <string>com.rajebdev.opttab</string>
+    <key>CFBundleVersion</key>
+    <string>1.0</string>
+    <key>CFBundleShortVersionString</key>
+    <string>1.0</string>
+    <key>CFBundlePackageType</key>
+    <string>APPL</string>
+    <key>CFBundleExecutable</key>
+    <string>OptTab</string>
+    <key>CFBundleIconFile</key>
+    <string>AppIcon.icns</string>
+    <key>CFBundleIconName</key>
+    <string>AppIcon</string>
+    <key>CFBundleInfoDictionaryVersion</key>
+    <string>6.0</string>
+    <key>LSMinimumSystemVersion</key>
+    <string>13.0</string>
+    <key>LSUIElement</key>
+    <true/>
+    <key>NSSupportsAutomaticGraphicsSwitching</key>
+    <true/>
+    <key>NSHighResolutionCapable</key>
+    <true/>
+    
+    <!-- Accessibility Permission Request -->
+    <key>NSAppleEventsUsageDescription</key>
+    <string>OptTab needs permission to capture keyboard events (Option+Tab) to show the app switcher window.</string>
+    
+    <!-- For macOS 10.15+ -->
+    <key>NSAccessibilityUsageDescription</key>
+    <string>OptTab needs accessibility access to monitor keyboard shortcuts (Option+Tab) and switch between windows.</string>
+    
+    <!-- Screen Recording Permission for Window Thumbnails -->
+    <key>NSScreenCaptureUsageDescription</key>
+    <string>OptTab needs screen recording permission to display window thumbnails in the app switcher.</string>
+</dict>
+</plist>

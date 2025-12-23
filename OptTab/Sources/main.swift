@@ -11,20 +11,22 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     func applicationDidFinishLaunching(_ notification: Notification) {
-        // Request accessibility permissions
-        let options: NSDictionary = [
-            kAXTrustedCheckOptionPrompt.takeUnretainedValue() as String: true
-        ]
-        let accessibilityEnabled = AXIsProcessTrustedWithOptions(options)
+        // Check accessibility permissions first WITHOUT showing prompt
+        let accessibilityEnabled = AXIsProcessTrusted()
 
         if !accessibilityEnabled {
+            // Only show prompt if permission is not granted
+            let options: NSDictionary = [
+                kAXTrustedCheckOptionPrompt.takeUnretainedValue() as String: true
+            ]
+            _ = AXIsProcessTrustedWithOptions(options)
             print("")
             print("⚠️  ⚠️  ⚠️  ACCESSIBILITY PERMISSION REQUIRED ⚠️  ⚠️  ⚠️")
             print("")
             print("📋 Steps to enable:")
             print("   1. Open System Settings")
             print("   2. Go to Privacy & Security → Accessibility")
-            print("   3. Click the '+' button or toggle ON for Terminal")
+            print("   3. Click the '+' button or toggle ON for OptTab")
             print("   4. Restart this app")
             print("")
             print(
@@ -37,6 +39,9 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         } else {
             print("✅ Accessibility permissions granted!")
         }
+
+        // Check Screen Recording permission (for thumbnails)
+        checkScreenRecordingPermission()
 
         // Initialize app switcher
         appSwitcher = AppSwitcher()
@@ -80,6 +85,30 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         }
     }
 
+    func checkScreenRecordingPermission() {
+        // Try to capture a small area to check screen recording permission
+        let hasPermission = CGPreflightScreenCaptureAccess()
+
+        if !hasPermission {
+            print("")
+            print("⚠️  SCREEN RECORDING PERMISSION NEEDED FOR THUMBNAILS")
+            print("")
+            print("📋 To show window thumbnails:")
+            print("   1. Open System Settings")
+            print("   2. Go to Privacy & Security → Screen Recording")
+            print("   3. Toggle ON for OptTab")
+            print("   4. Restart this app")
+            print("")
+            print("💡 App will work without thumbnails, but icons only.")
+            print("")
+
+            // Request permission by attempting screen capture
+            CGRequestScreenCaptureAccess()
+        } else {
+            print("✅ Screen Recording permission granted! Thumbnails enabled.")
+        }
+    }
+
     func setupMenuBar() {
         statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
 
@@ -109,11 +138,19 @@ class AppDelegate: NSObject, NSApplicationDelegate {
                 button.image = coloredIcon
             } else {
                 // Fallback to template if file not found
-                button.image = NSImage(contentsOfFile: "OptTab/Resources/MenuBarIcon.png")
+                if let iconPath = Bundle.main.path(forResource: "MenuBarIcon", ofType: "png") {
+                    button.image = NSImage(contentsOfFile: iconPath)
+                } else {
+                    button.image = NSImage(
+                        systemSymbolName: "square.grid.2x2", accessibilityDescription: "OptTab")
+                }
             }
         } else {
             // Use template icon (black/white auto-adapt)
-            if let templateIcon = NSImage(contentsOfFile: "OptTab/Resources/MenuBarIcon.png") {
+            if let iconPath = Bundle.main.path(forResource: "MenuBarIcon", ofType: "png"),
+                let templateIcon = NSImage(contentsOfFile: iconPath)
+            {
+                templateIcon.isTemplate = true
                 button.image = templateIcon
             } else {
                 button.image = NSImage(
@@ -124,7 +161,9 @@ class AppDelegate: NSObject, NSApplicationDelegate {
 
     func generateColoredMenuBarIcon() -> NSImage? {
         // Load app icon and resize to menu bar size
-        guard let appIcon = NSImage(contentsOfFile: "OptTab/Resources/AppIcon.png") else {
+        guard let iconPath = Bundle.main.path(forResource: "AppIcon", ofType: "png"),
+            let appIcon = NSImage(contentsOfFile: iconPath)
+        else {
             return nil
         }
 
@@ -163,7 +202,9 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         alert.alertStyle = .informational
 
         // Try to load app icon
-        if let appIcon = NSImage(contentsOfFile: "OptTab/Resources/AppIcon.png") {
+        if let iconPath = Bundle.main.path(forResource: "AppIcon", ofType: "png"),
+            let appIcon = NSImage(contentsOfFile: iconPath)
+        {
             alert.icon = appIcon
         }
 
