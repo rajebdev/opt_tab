@@ -59,6 +59,12 @@ class AppDelegate: NSObject, NSApplicationDelegate {
                     self.appSwitcher?.show()
                     return nil  // Consume the event
                 }
+
+                // Check for Q when Option is held (Opt+Q to minimize)
+                if event.modifierFlags.contains(.option) && event.keyCode == 12 {  // 12 = Q
+                    self.appSwitcher?.minimizeCurrentWindow()
+                    return nil  // Consume the event
+                }
             }
 
             return event
@@ -70,6 +76,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
 
         print("")
         print("✅ OptTab started. Press Option+Tab to switch apps.")
+        print("✅ Press Option+Q to minimize current window.")
         print("📍 Menu bar icon is in the top-right corner")
         print("")
     }
@@ -224,7 +231,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         let alert = NSAlert()
         alert.messageText = "OptTab"
         alert.informativeText =
-            "Lightweight Alt+Tab replacement for macOS\n\nShortcut: Option+Tab\nVersion: 1.0.0"
+            "Lightweight Alt+Tab replacement for macOS\n\nShortcuts:\n• Option+Tab - Switch apps\n• Option+Q - Minimize window\n\nVersion: 1.0.0"
         alert.alertStyle = .informational
 
         // Try to load app icon

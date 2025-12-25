@@ -739,9 +739,18 @@ class AppSwitcher {
         let view = ClickableView()
         view.clickHandler = { [weak self] in
             guard let self = self else { return }
+            // Set selected index
             self.selectedIndex = index
-            // Immediately hide and switch to the clicked window
-            self.hide()
+
+            // Show blue selection visual feedback first
+            view.layer?.backgroundColor = NSColor.systemBlue.withAlphaComponent(0.9).cgColor
+            view.layer?.borderWidth = 3
+            view.layer?.borderColor = NSColor.systemBlue.cgColor
+
+            // Wait a moment to show the selection, then hide and switch
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.15) { [weak self] in
+                self?.hide()
+            }
         }
         view.wantsLayer = true
         view.layer?.backgroundColor =
@@ -1099,6 +1108,57 @@ class AppSwitcher {
             AXUIElementPerformAction(window, kAXRaiseAction as CFString)
             AXUIElementSetAttributeValue(
                 window, kAXFocusedAttribute as CFString, kCFBooleanTrue)
+        }
+    }
+
+    // MARK: - Minimize Current Window
+    /// Minimize the frontmost window using Opt+Q
+    func minimizeCurrentWindow() {
+        print("🔽 Minimize window requested (Opt+Q)")
+
+        // Get the frontmost application
+        guard let frontmostApp = NSWorkspace.shared.frontmostApplication else {
+            print("❌ No frontmost application")
+            return
+        }
+
+        let pid = frontmostApp.processIdentifier
+        let appName = frontmostApp.localizedName ?? "Unknown"
+        print("  → Frontmost app: \(appName) (PID: \(pid))")
+
+        // Get the focused window using AX API
+        let appElement = AXUIElementCreateApplication(pid)
+        var focusedWindowRef: CFTypeRef?
+
+        let result = AXUIElementCopyAttributeValue(
+            appElement,
+            kAXFocusedWindowAttribute as CFString,
+            &focusedWindowRef
+        )
+
+        if result == .success, let focusedWindow = focusedWindowRef {
+            let window = focusedWindow as! AXUIElement
+
+            // Get window title for logging
+            var titleRef: CFTypeRef?
+            AXUIElementCopyAttributeValue(window, kAXTitleAttribute as CFString, &titleRef)
+            let windowTitle = (titleRef as? String) ?? "Untitled"
+            print("  → Focused window: \(windowTitle)")
+
+            // Minimize the window
+            let setResult = AXUIElementSetAttributeValue(
+                window,
+                kAXMinimizedAttribute as CFString,
+                kCFBooleanTrue
+            )
+
+            if setResult == .success {
+                print("✅ Window minimized successfully")
+            } else {
+                print("❌ Failed to minimize window: \(setResult.rawValue)")
+            }
+        } else {
+            print("❌ Failed to get focused window: \(result.rawValue)")
         }
     }
 
